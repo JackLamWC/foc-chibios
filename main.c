@@ -16,6 +16,46 @@
 
 #include "ch.h"
 #include "hal.h"
+#include "log.h"
+
+#include "shell.h"
+#include "chprintf.h"
+
+/*===========================================================================*/
+/* Command line related.                                                     */
+/*===========================================================================*/
+#define SHELL_WA_SIZE THD_WORKING_AREA_SIZE(2048)
+
+void cmd_version(BaseSequentialStream *chp, int argc, char *argv[]) {
+  (void)chp;
+  (void)argc;
+  (void)argv;
+  chprintf(chp, "Version: 1.0.0\r\n");
+}
+
+static const ShellCommand shell_commands[] = {
+  {"version", cmd_version},
+  {NULL, NULL}
+};
+
+char shell_history[SHELL_MAX_HIST_BUFF];
+char *shell_completions[SHELL_MAX_COMPLETIONS];
+
+const SerialConfig sd2_config = {
+    .speed = 115200,
+    .cr1 = 0,
+    .cr2 = 0,
+    .cr3 = 0,
+};
+
+static const ShellConfig shell_cfg = {
+    (BaseSequentialStream *)&SD2,
+    shell_commands,
+    shell_history,
+    sizeof(shell_history),
+    shell_completions,
+};
+
 
 /*
  * Green LED blinker thread, times are in milliseconds.
@@ -48,10 +88,12 @@ int main(void) {
   halInit();
   chSysInit();
 
+  shellInit();
+
   /*
-   * Activates the serial driver 2 using the driver default configuration.
+   * Activates the serial driver 2 for logging
    */
-  sdStart(&SD2, NULL);
+  sdStart(&SD2, &sd2_config);
 
   /*
    * Creates the blinker thread.
@@ -63,7 +105,11 @@ int main(void) {
    * sleeping in a loop and check the button state.
    */
   while (true) {
-    
+    LOG("main", "Hello, World!\r\n");
+    thread_t *shell_thd = chThdCreateFromHeap(NULL, SHELL_WA_SIZE,
+                                                "shell", NORMALPRIO + 1,
+                                                shellThread, (void *)&shell_cfg);
+    chThdWait(shell_thd); /* Wait for the shell thread to exit */
     chThdSleepMilliseconds(500);
   }
 }
