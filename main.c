@@ -21,6 +21,56 @@
 #include "shell.h"
 #include "chprintf.h"
 
+
+
+
+/*===========================================================================*/
+/* PWM related.                                                              */
+/*===========================================================================*/
+#define LINE_PWM PAL_LINE(GPIOA, GPIOE_PIN8)
+
+static PWMConfig pwm_config = {
+  42000000, // 42MHz
+  420, // 50KHz
+  NULL,
+  {
+    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_DISABLED, NULL}
+  },
+  0,
+  0,
+  0
+};
+
+/*===========================================================================*/
+/* ADC related.                                                              */
+/*===========================================================================*/
+#define LINE_ADC PAL_LINE(GPIOA, GPIOE_PIN0)
+#define ADC_NUM_CHANNELS 1
+#define ADC_BUF_DEPTH 1
+
+static adcsample_t adc_sample[ADC_NUM_CHANNELS * ADC_BUF_DEPTH];
+
+static ADCConversionGroup adc_groupConfig = {
+  FALSE,
+  ADC_NUM_CHANNELS,
+  NULL,
+  NULL,
+  0,
+  ADC_CR2_SWSTART,
+  0,
+  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15),
+  0,
+  0,
+  0,
+  0,
+  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0),
+};
+
+
+
 /*===========================================================================*/
 /* Command line related.                                                     */
 /*===========================================================================*/
@@ -33,8 +83,17 @@ void cmd_version(BaseSequentialStream *chp, int argc, char *argv[]) {
   chprintf(chp, "Version: 1.0.0\r\n");
 }
 
+void cmd_adc(BaseSequentialStream *chp, int argc, char *argv[]) {
+  (void)chp;
+  (void)argc;
+  (void)argv;
+  adcConvert(&ADCD1, &adc_groupConfig, adc_sample, ADC_BUF_DEPTH);
+  chprintf(chp, "ADC: %.1fv\r\n", (adc_sample[0] / 4095.0f) * 3.3f);
+}
+
 static const ShellCommand shell_commands[] = {
   {"version", cmd_version},
+  {"adc", cmd_adc},
   {NULL, NULL}
 };
 
@@ -73,6 +132,7 @@ static THD_FUNCTION(Thread1, arg) {
   }
 }
 
+
 /*
  * Application entry point.
  */
@@ -90,10 +150,23 @@ int main(void) {
 
   shellInit();
 
+  palSetLineMode(LINE_PWM, PAL_MODE_ALTERNATE(1));
+  palClearLine(LINE_PWM);
+
+  palSetLineMode(LINE_ADC, PAL_MODE_INPUT_ANALOG);
+
+  pwmStart(&PWMD1, &pwm_config);
+  pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 5000));
+
   /*
    * Activates the serial driver 2 for logging
    */
   sdStart(&SD2, &sd2_config);
+
+  /*
+   * Activates the ADC driver
+   */
+  adcStart(&ADCD1, NULL);
 
   /*
    * Creates the blinker thread.
