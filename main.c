@@ -40,7 +40,9 @@ static GPTConfig gpt3_config = {
 /*===========================================================================*/
 /* PWM related.                                                              */
 /*===========================================================================*/
-#define LINE_PWM PAL_LINE(GPIOA, GPIOE_PIN8)
+#define LINE_PWM_A PAL_LINE(GPIOA, GPIOE_PIN8)
+#define LINE_PWM_B PAL_LINE(GPIOA, GPIOE_PIN9)
+#define LINE_PWM_C PAL_LINE(GPIOA, GPIOE_PIN10)
 
 static PWMConfig pwm_config = {
   42000000, // 42MHz
@@ -48,8 +50,8 @@ static PWMConfig pwm_config = {
   NULL,
   {
     {PWM_OUTPUT_ACTIVE_HIGH, NULL},
-    {PWM_OUTPUT_DISABLED, NULL},
-    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
+    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
     {PWM_OUTPUT_DISABLED, NULL}
   },
   0,
@@ -57,11 +59,18 @@ static PWMConfig pwm_config = {
   0
 };
 
+void pwm_write_duty(uint8_t channel, uint16_t duty) {
+  pwmEnableChannel(&PWMD1, channel, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, duty));
+}
+
 /*===========================================================================*/
 /* ADC related.                                                              */
 /*===========================================================================*/
-#define LINE_ADC PAL_LINE(GPIOA, GPIOE_PIN0)
-#define ADC_NUM_CHANNELS 1
+#define LINE_ADC_A PAL_LINE(GPIOA, GPIOE_PIN0)
+#define LINE_ADC_B PAL_LINE(GPIOA, GPIOE_PIN1)
+#define LINE_ADC_C PAL_LINE(GPIOA, GPIOE_PIN4)
+
+#define ADC_NUM_CHANNELS 3
 #define ADC_BUF_DEPTH 1
 
 static adcsample_t adc_samples[ADC_NUM_CHANNELS * ADC_BUF_DEPTH];
@@ -74,13 +83,17 @@ static ADCConversionGroup adc_groupConfig = {
   0,
   ADC_CR2_EXTEN_RISING | ADC_CR2_EXTSEL_SRC(8),
   0,
-  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15),
+  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_15),
   0,
   0,
   0,
   0,
-  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0),
+  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0) | ADC_SQR3_SQ2_N(ADC_CHANNEL_IN1) | ADC_SQR3_SQ3_N(ADC_CHANNEL_IN4),
 };
+
+float adc_get_voltage(uint8_t channel) {
+  return (adc_samples[channel] / 4095.0f) * 3.3f;
+}
 
 
 
@@ -162,13 +175,30 @@ int main(void) {
 
   shellInit();
 
-  palSetLineMode(LINE_PWM, PAL_MODE_ALTERNATE(1));
-  palClearLine(LINE_PWM);
+  /*
+   * Set the PWM lines to alternate function mode
+   */
+  palSetLineMode(LINE_PWM_A, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_PWM_B, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_PWM_C, PAL_MODE_ALTERNATE(1));
+  palClearLine(LINE_PWM_A);
+  palClearLine(LINE_PWM_B);
+  palClearLine(LINE_PWM_C);
 
-  palSetLineMode(LINE_ADC, PAL_MODE_INPUT_ANALOG);
+  /*
+   * Set the ADC lines to analog input mode
+   */
+  palSetLineMode(LINE_ADC_A, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_ADC_B, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_ADC_C, PAL_MODE_INPUT_ANALOG);
 
+  /*
+   * Start the PWM driver
+   */
   pwmStart(&PWMD1, &pwm_config);
-  pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 5000));
+  pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
+  pwmEnableChannel(&PWMD1, 1, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
+  pwmEnableChannel(&PWMD1, 2, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
 
   /*
    * Activates the serial driver 2 for logging
