@@ -18,10 +18,23 @@
 #include "hal.h"
 #include "log.h"
 
+/* TRUE means that DMA-accessible buffers are placed in a non-cached RAM
+   area and that no cache management is required.*/
+#define DMA_BUFFERS_COHERENCE TRUE
+
 #include "shell.h"
 #include "chprintf.h"
 
+/*===========================================================================*/
+/* GPT related.                                                              */
+/*===========================================================================*/
 
+static GPTConfig gpt3_config = {
+  .frequency = 1000000, // 1MHz
+  .callback = NULL,
+  .cr2 = TIM_CR2_MMS_1,
+  .dier = 0,
+};
 
 
 /*===========================================================================*/
@@ -51,7 +64,7 @@ static PWMConfig pwm_config = {
 #define ADC_NUM_CHANNELS 1
 #define ADC_BUF_DEPTH 1
 
-static adcsample_t adc_sample[ADC_NUM_CHANNELS * ADC_BUF_DEPTH];
+static adcsample_t adc_samples[ADC_NUM_CHANNELS * ADC_BUF_DEPTH];
 
 static ADCConversionGroup adc_groupConfig = {
   FALSE,
@@ -59,7 +72,7 @@ static ADCConversionGroup adc_groupConfig = {
   NULL,
   NULL,
   0,
-  ADC_CR2_SWSTART,
+  ADC_CR2_EXTEN_RISING | ADC_CR2_EXTSEL_SRC(8),
   0,
   ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15),
   0,
@@ -87,8 +100,7 @@ void cmd_adc(BaseSequentialStream *chp, int argc, char *argv[]) {
   (void)chp;
   (void)argc;
   (void)argv;
-  adcConvert(&ADCD1, &adc_groupConfig, adc_sample, ADC_BUF_DEPTH);
-  chprintf(chp, "ADC: %.1fv\r\n", (adc_sample[0] / 4095.0f) * 3.3f);
+  chprintf(chp, "ADC: %.1fv\r\n", (adc_samples[0] / 4095.0f) * 3.3f);
 }
 
 static const ShellCommand shell_commands[] = {
@@ -164,9 +176,24 @@ int main(void) {
   sdStart(&SD2, &sd2_config);
 
   /*
+   * Activates the GPT driver
+   */
+  gptStart(&GPTD3, &gpt3_config);
+
+   /*
    * Activates the ADC driver
    */
-  adcStart(&ADCD1, NULL);
+  adcStart(&ADCD1, NULL); // 10.5 MHz
+
+  /*
+   * Start the ADC conversion
+   */
+  adcStartConversion(&ADCD1, &adc_groupConfig, adc_samples, ADC_BUF_DEPTH);
+
+  /*
+   * Start the GPT timer in continuous mode
+   */
+  gptStartContinuous(&GPTD3, 100); // update frequency = 1M / 100 = 10KHz
 
   /*
    * Creates the blinker thread.
