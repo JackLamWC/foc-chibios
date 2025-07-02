@@ -40,9 +40,16 @@ static GPTConfig gpt3_config = {
 /*===========================================================================*/
 /* PWM related.                                                              */
 /*===========================================================================*/
-#define LINE_PWM_A PAL_LINE(GPIOA, GPIOE_PIN8)
-#define LINE_PWM_B PAL_LINE(GPIOA, GPIOE_PIN9)
-#define LINE_PWM_C PAL_LINE(GPIOA, GPIOE_PIN10)
+
+/* the mode of pwm which is either 6 pwm or 3 pwm. to select the mode, set or reset the M_PWM, HIGH = 3 pwm, LOW = 6 pwm */
+/* normal mode: 3 pwm */
+#define LINE_M_PWM PAL_LINE(GPIOA, GPIOE_PIN11)
+#define LINE_MTR_PWM_PHASE_A PAL_LINE(GPIOA, GPIOE_PIN8)
+#define LINE_MTR_PWM_PHASE_A_COMP PAL_LINE(GPIOC, GPIOC_PIN8)
+#define LINE_MTR_PWM_PHASE_B PAL_LINE(GPIOA, GPIOE_PIN9)
+#define LINE_MTR_PWM_PHASE_B_COMP PAL_LINE(GPIOC, GPIOC_PIN6)
+#define LINE_MTR_PWM_PHASE_C PAL_LINE(GPIOA, GPIOE_PIN10)
+#define LINE_MTR_PWM_PHASE_C_COMP PAL_LINE(GPIOC, GPIOC_PIN5)
 
 static PWMConfig pwm_config = {
   42000000, // 42MHz
@@ -66,33 +73,41 @@ void pwm_write_duty(uint8_t channel, uint16_t duty) {
 /*===========================================================================*/
 /* ADC related.                                                              */
 /*===========================================================================*/
-#define LINE_ADC_A PAL_LINE(GPIOA, GPIOE_PIN0)
-#define LINE_ADC_B PAL_LINE(GPIOA, GPIOE_PIN1)
-#define LINE_ADC_C PAL_LINE(GPIOA, GPIOE_PIN4)
+#define LINE_MTR_VOLTAGE_PHASE_A PAL_LINE(GPIOA, GPIOE_PIN0)
+#define LINE_MTR_VOLTAGE_PHASE_B PAL_LINE(GPIOA, GPIOE_PIN1)
+#define LINE_MTR_VOLTAGE_PHASE_C PAL_LINE(GPIOA, GPIOE_PIN4)
+#define LINE_MTR_VOLTAGE_VPDD PAL_LINE(GPIOB, GPIOB_ARD_A3)
 
-#define ADC_NUM_CHANNELS 3
-#define ADC_BUF_DEPTH 1
+#define MTR_ADC_NUM_CHANNELS 4
+#define MTR_ADC_BUF_DEPTH 1
 
-static adcsample_t adc_samples[ADC_NUM_CHANNELS * ADC_BUF_DEPTH];
+static adcsample_t mtr_voltage_adc_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DEPTH];
 
-static ADCConversionGroup adc_groupConfig = {
+static ADCConversionGroup mtr_voltage_adc_groupConfig = {
   FALSE,
-  ADC_NUM_CHANNELS,
+  MTR_ADC_NUM_CHANNELS,
   NULL,
   NULL,
   0,
   ADC_CR2_EXTEN_RISING | ADC_CR2_EXTSEL_SRC(8),
   0,
-  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_15),
+  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_15) | ADC_SMPR2_SMP_AN8(ADC_SAMPLE_15),
   0,
   0,
   0,
   0,
-  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0) | ADC_SQR3_SQ2_N(ADC_CHANNEL_IN1) | ADC_SQR3_SQ3_N(ADC_CHANNEL_IN4),
+  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0) | ADC_SQR3_SQ2_N(ADC_CHANNEL_IN1) | ADC_SQR3_SQ3_N(ADC_CHANNEL_IN4) | ADC_SQR3_SQ4_N(ADC_CHANNEL_IN8),
 };
 
-float adc_get_voltage(uint8_t channel) {
-  return (adc_samples[channel] / 4095.0f) * 3.3f;
+float mtr_voltage_adc_get_voltage(uint8_t channel) {
+  return (mtr_voltage_adc_samples[channel] / 4095.0f) * 3.3f;
+}
+
+void mtr_voltage_adc_init(void) {
+  palSetLineMode(LINE_MTR_VOLTAGE_PHASE_A, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_MTR_VOLTAGE_PHASE_B, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_MTR_VOLTAGE_PHASE_C, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_MTR_VOLTAGE_VPDD, PAL_MODE_INPUT_ANALOG);
 }
 
 
@@ -113,7 +128,7 @@ void cmd_adc(BaseSequentialStream *chp, int argc, char *argv[]) {
   (void)chp;
   (void)argc;
   (void)argv;
-  chprintf(chp, "ADC: %.1fv\r\n", (adc_samples[0] / 4095.0f) * 3.3f);
+  chprintf(chp, "ADC: %.1fv\r\n", (mtr_voltage_adc_samples[0] / 4095.0f) * 3.3f);
 }
 
 static const ShellCommand shell_commands[] = {
@@ -178,26 +193,19 @@ int main(void) {
   /*
    * Set the PWM lines to alternate function mode
    */
-  palSetLineMode(LINE_PWM_A, PAL_MODE_ALTERNATE(1));
-  palSetLineMode(LINE_PWM_B, PAL_MODE_ALTERNATE(1));
-  palSetLineMode(LINE_PWM_C, PAL_MODE_ALTERNATE(1));
-  palClearLine(LINE_PWM_A);
-  palClearLine(LINE_PWM_B);
-  palClearLine(LINE_PWM_C);
-
-  /*
-   * Set the ADC lines to analog input mode
-   */
-  palSetLineMode(LINE_ADC_A, PAL_MODE_INPUT_ANALOG);
-  palSetLineMode(LINE_ADC_B, PAL_MODE_INPUT_ANALOG);
-  palSetLineMode(LINE_ADC_C, PAL_MODE_INPUT_ANALOG);
+  palSetLineMode(LINE_MTR_PWM_PHASE_A, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_MTR_PWM_PHASE_B, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_MTR_PWM_PHASE_C, PAL_MODE_ALTERNATE(1));
+  palClearLine(LINE_MTR_PWM_PHASE_A);
+  palClearLine(LINE_MTR_PWM_PHASE_B);
+  palClearLine(LINE_MTR_PWM_PHASE_C);
 
   /*
    * Start the PWM driver
    */
   pwmStart(&PWMD1, &pwm_config);
   pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
-  pwmEnableChannel(&PWMD1, 1, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
+  pwmEnableChannel(&PWMD1, 1, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0)); 
   pwmEnableChannel(&PWMD1, 2, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, 0));
 
   /*
@@ -218,7 +226,7 @@ int main(void) {
   /*
    * Start the ADC conversion
    */
-  adcStartConversion(&ADCD1, &adc_groupConfig, adc_samples, ADC_BUF_DEPTH);
+  adcStartConversion(&ADCD1, &mtr_voltage_adc_groupConfig, mtr_voltage_adc_samples, MTR_ADC_BUF_DEPTH);
 
   /*
    * Start the GPT timer in continuous mode
