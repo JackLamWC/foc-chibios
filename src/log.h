@@ -3,6 +3,6 @@
 
 #include "ch.h"
 
-#define LOG(tag,...) chprintf((BaseSequentialStream *)&SD2, "[%s] " __VA_ARGS__, tag)
+#define LOG(...) chprintf((BaseSequentialStream *)&SD2, __VA_ARGS__)
 
 #endif // LOG_H
