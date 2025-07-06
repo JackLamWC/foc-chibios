@@ -36,6 +36,9 @@
 /*===========================================================================*/
 /* GPT related.                                                              */
 /*===========================================================================*/
+static uint32_t last_isr_cycles = 0;
+static uint32_t debug_isr_duration_cycles = 0;
+
 
 static GPTConfig gpt3_config = {
   .frequency = 1000000, // 1MHz
@@ -66,16 +69,9 @@ static GPTConfig gpt3_config = {
 
 #define MTR_DEFAULT_DUTY 20
 
-typedef struct {
-  ioline_t high_side_line;
-  ioline_t low_side_line;
-} mtr_pwm_channel_t;
 
-static mtr_pwm_channel_t mtr_pwm_channels[MTR_PWM_CHANNELS] = {
-  {LINE_MTR_PWM_PHASE_AH, LINE_MTR_PWM_PHASE_AL},
-  {LINE_MTR_PWM_PHASE_BH, LINE_MTR_PWM_PHASE_BL},
-  {LINE_MTR_PWM_PHASE_CH, LINE_MTR_PWM_PHASE_CL},
-};
+
+
 
 static PWMConfig mtr_pwm_config = {
   42000000, // 42MHz
@@ -100,9 +96,9 @@ static void mtr_pwm_init(void) {
   palSetLineMode(LINE_MTR_PWM_PHASE_BH, PAL_MODE_ALTERNATE(1));
   palSetLineMode(LINE_MTR_PWM_PHASE_CH, PAL_MODE_ALTERNATE(1));
 
-  palSetLineMode(LINE_MTR_PWM_PHASE_AL, PAL_MODE_OUTPUT_PUSHPULL);
-  palSetLineMode(LINE_MTR_PWM_PHASE_BL, PAL_MODE_OUTPUT_PUSHPULL);
-  palSetLineMode(LINE_MTR_PWM_PHASE_CL, PAL_MODE_OUTPUT_PUSHPULL);
+  palSetLineMode(LINE_MTR_PWM_PHASE_AL, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_MTR_PWM_PHASE_BL, PAL_MODE_ALTERNATE(1));
+  palSetLineMode(LINE_MTR_PWM_PHASE_CL, PAL_MODE_ALTERNATE(1));
 
 
   palClearLine(LINE_MTR_PWM_PHASE_AH);
@@ -140,89 +136,64 @@ static bool mtr_commutation_is_vaild_state(uint8_t state) {
 
 static uint16_t mtr_duty = MTR_DEFAULT_DUTY * 10;
 
+typedef enum {
+  MTR_COMMUTATION_PASHE_IN, // up side close
+  MTR_COMMUTATION_PASHE_OUT, // low side close
+  MTR_COMMUTATION_PASHE_FLOATING, // up and low side open
+} mtr_commutation_phase;
+
+static mtr_commutation_phase mtr_commutation_phase_table[8][3] = {
+  {MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING}, // 000 - invalid state
+  {MTR_COMMUTATION_PASHE_OUT     , MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_IN}, // 001
+  {MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_IN     , MTR_COMMUTATION_PASHE_OUT}, // 010
+  {MTR_COMMUTATION_PASHE_OUT     , MTR_COMMUTATION_PASHE_IN     , MTR_COMMUTATION_PASHE_FLOATING}, // 011
+  {MTR_COMMUTATION_PASHE_IN      , MTR_COMMUTATION_PASHE_OUT    , MTR_COMMUTATION_PASHE_FLOATING}, // 100
+  {MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_OUT    , MTR_COMMUTATION_PASHE_IN}, // 101
+  {MTR_COMMUTATION_PASHE_IN      , MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_OUT}, // 110
+  {MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING}, // 111 - invalid state
+};
+
+
+static uint8_t last_state = 0;
 inline static void mtr_commutation_set_state(uint8_t state) {
   mtr_commutation_state = state;
-  switch(state) {
-    case 0b100:
-      mtr_pwm_write_duty(MTR_PHASE_A, mtr_duty);
-      mtr_pwm_write_duty(MTR_PHASE_B, 0);
-      mtr_pwm_write_duty(MTR_PHASE_C, 0);
-      // palSetLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-    case 0b110:
-      mtr_pwm_write_duty(MTR_PHASE_A, mtr_duty);
-      mtr_pwm_write_duty(MTR_PHASE_B, 0);
-      mtr_pwm_write_duty(MTR_PHASE_C, 0);
-      // palClearLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-    case 0b010:
-      mtr_pwm_write_duty(MTR_PHASE_A, 0);
-      mtr_pwm_write_duty(MTR_PHASE_B, mtr_duty);
-      mtr_pwm_write_duty(MTR_PHASE_C, 0);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      // palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-    case 0b011:
-      mtr_pwm_write_duty(MTR_PHASE_A, 0);
-      mtr_pwm_write_duty(MTR_PHASE_B, mtr_duty);
-      mtr_pwm_write_duty(MTR_PHASE_C, 0);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      // palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-    case 0b001:
-      mtr_pwm_write_duty(MTR_PHASE_A, 0);
-      mtr_pwm_write_duty(MTR_PHASE_B, 0);
-      mtr_pwm_write_duty(MTR_PHASE_C, mtr_duty);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      // palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-    case 0b101:
-      mtr_pwm_write_duty(MTR_PHASE_A, 0);
-      mtr_pwm_write_duty(MTR_PHASE_B, 0);
-      mtr_pwm_write_duty(MTR_PHASE_C, mtr_duty);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_A].low_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_B].high_side_line);
-      palSetLine(mtr_pwm_channels[MTR_PHASE_B].low_side_line);
-      // palClearLine(mtr_pwm_channels[MTR_PHASE_C].high_side_line);
-      palClearLine(mtr_pwm_channels[MTR_PHASE_C].low_side_line);
-      break;
-
-    default:
-      mtr_pwm_write_duty(MTR_PHASE_A, 0);
-      mtr_pwm_write_duty(MTR_PHASE_B, 0);
-      mtr_pwm_write_duty(MTR_PHASE_C, 0);
-      for(int i = 0; i < MTR_PWM_CHANNELS; i++) {
-        palClearLine(mtr_pwm_channels[i].high_side_line);
-        palClearLine(mtr_pwm_channels[i].low_side_line);
+  if(state == last_state) {
+    return;
+  }
+  last_state = state;
+    
+  uint16_t phases_duty[MTR_PWM_CHANNELS] = {0, 0, 0};
+  pwmStop(&PWMD1);
+  for(int i = 0; i < MTR_PWM_CHANNELS; i++) {
+    switch(mtr_commutation_phase_table[state][i]) {
+      case MTR_COMMUTATION_PASHE_IN: {
+        phases_duty[i] = 5000 + mtr_duty / 2;
+        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH;
+        break;
       }
-      break;
+      case MTR_COMMUTATION_PASHE_OUT: {
+        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_LOW | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_LOW;
+        phases_duty[i] = 10000 - (5000 - mtr_duty / 2);
+        break;
+      }
+      case MTR_COMMUTATION_PASHE_FLOATING: {
+        phases_duty[i] = 0;
+        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_DISABLED;
+        break;
+      }
+    }
+  }
+  pwmStart(&PWMD1, &mtr_pwm_config);
+  for(int i = 0; i < MTR_PWM_CHANNELS; i++) {
+    mtr_pwm_write_duty(i, phases_duty[i]);
   }
 }
 
 void mtr_commutation_transit_to_state(void) {
+  uint32_t end_cycles = DWT->CYCCNT;
+  uint32_t duration_cycles = end_cycles - last_isr_cycles;
+  last_isr_cycles = end_cycles;
+  debug_isr_duration_cycles = duration_cycles;
   switch(mtr_commutation_state) {
     case 0b100:
       mtr_commutation_set_state(0b110);
@@ -340,13 +311,13 @@ void mtr_control_stop(void) {
 /*===========================================================================*/
 #define LINE_MTR_VOLTAGE_PHASE_A PAL_LINE(GPIOA, GPIOA_ARD_A0)
 #define LINE_MTR_VOLTAGE_PHASE_B PAL_LINE(GPIOA, GPIOA_ARD_A1)
-#define LINE_MTR_VOLTAGE_PHASE_C PAL_LINE(GPIOA, GPIOA_ADC1_IN4)
-#define LINE_MTR_VOLTAGE_VPDD PAL_LINE(GPIOC, GPIOC_ARD_A5)
+#define LINE_MTR_VOLTAGE_PHASE_C PAL_LINE(GPIOA, LINE_ARD_A2)
+#define LINE_MTR_VOLTAGE_VPDD PAL_LINE(GPIOC, LINE_ARD_A4)
 
 #define MTR_ADC_NUM_CHANNELS 4
 #define MTR_ADC_BUF_DEPTH 1
 
-#define MTR_ADC_BACKEMF_THRESHOLD 0.5f
+#define MTR_ADC_BACKEMF_THRESHOLD 0.3f
 #define MTR_ADC_BACKEMF_PHASE_A 0
 #define MTR_ADC_BACKEMF_PHASE_B 1
 #define MTR_ADC_BACKEMF_PHASE_C 2
@@ -355,7 +326,7 @@ void mtr_control_stop(void) {
 static adcsample_t mtr_voltage_adc_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DEPTH];
 
 float mtr_voltage_adc_get_voltage(uint8_t channel) {
-  return (mtr_voltage_adc_samples[channel * MTR_ADC_BUF_DEPTH] / 4095.0f) * 3.3f;
+  return (mtr_voltage_adc_samples[channel] / 4095.0f) * 3.3f;
 }
 
 void mtr_voltage_adc_init(void) {
@@ -387,15 +358,8 @@ static void mtr_backemf_init(void) {
 }
 
 uint16_t mtr_backemf_voltage_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DEPTH];
-
-static uint32_t last_isr_cycles = 0;
-static uint32_t debug_isr_duration_cycles = 0;
 void mtr_commutation_adc_backemf_cb(ADCDriver *adcp) {
   (void)adcp;
-  uint32_t end_cycles = DWT->CYCCNT;
-  uint32_t duration_cycles = end_cycles - last_isr_cycles;
-  last_isr_cycles = end_cycles;
-  debug_isr_duration_cycles = duration_cycles;
 #ifndef JACK_DEBUG
   if(!mtr_commutation_is_vaild_state(mtr_commutation_state)) {
     return;
@@ -409,7 +373,6 @@ void mtr_commutation_adc_backemf_cb(ADCDriver *adcp) {
     if(backemf_phase != 0xFF) {
       float backemf_voltage = mtr_voltage_adc_get_voltage(backemf_phase);
       float vpdd_voltage = mtr_voltage_adc_get_voltage(MTR_ADC_BACKEMF_VPDD);
-      
       if(backemf_voltage >= vpdd_voltage * MTR_ADC_BACKEMF_THRESHOLD) {
         mtr_commutation_transit_to_state();
       }
@@ -427,19 +390,19 @@ void mtr_commutation_adc_backemf_cb(ADCDriver *adcp) {
 }
 
 static ADCConversionGroup mtr_voltage_adc_groupConfig = {
-  TRUE,
+  true,
   MTR_ADC_NUM_CHANNELS,
   mtr_commutation_adc_backemf_cb,
   NULL,
   0,
   ADC_CR2_EXTEN_RISING | ADC_CR2_EXTSEL_SRC(8),
-  0,
-  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN8(ADC_SAMPLE_3),
-  0,
-  0,
+  ADC_SMPR1_SMP_AN11(ADC_SAMPLE_3),
+  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_3),
   0,
   0,
-  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0) | ADC_SQR3_SQ2_N(ADC_CHANNEL_IN1) | ADC_SQR3_SQ3_N(ADC_CHANNEL_IN4) | ADC_SQR3_SQ4_N(ADC_CHANNEL_IN8),
+  0,
+  0,
+  ADC_SQR3_SQ1_N(ADC_CHANNEL_IN0) | ADC_SQR3_SQ2_N(ADC_CHANNEL_IN1) | ADC_SQR3_SQ3_N(ADC_CHANNEL_IN4) | ADC_SQR3_SQ4_N(ADC_CHANNEL_IN11),
 };
 
 /*===========================================================================*/
@@ -521,6 +484,22 @@ void cmd_mtr_debug(BaseSequentialStream *chp, int argc, char *argv[]) {
   chprintf(chp, "Commutation state: %d\r\n", mtr_commutation_state);
 }
 
+void cmd_mtr_set_state(BaseSequentialStream *chp, int argc, char *argv[]) {
+  (void)chp;
+  (void)argc;
+  (void)argv;
+  if(argc == 2) {
+    uint8_t state = atoi(argv[0]);
+    uint16_t duty = atoi(argv[1]);
+    mtr_duty = duty * 100;
+    chprintf(chp, "Setting state to %d, duty to %d\r\n", state, duty);
+    mtr_commutation_set_state(state);
+  }
+  else {
+    chprintf(chp, "Usage: mtr-set-state <state> <duty>\r\n");
+  }
+}
+
 static const ShellCommand shell_commands[] = {
   {"version", cmd_version},
   {"adc", cmd_adc},
@@ -528,6 +507,7 @@ static const ShellCommand shell_commands[] = {
   {"mtr-enable", cmd_motor_enable},
   {"mtr-fault", cmd_motor_fault},
   {"mtr-debug", cmd_mtr_debug},
+  {"mtr-set-state", cmd_mtr_set_state},
   {NULL, NULL}
 };
 
