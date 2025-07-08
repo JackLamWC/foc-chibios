@@ -18,6 +18,10 @@
 #include "hal.h"
 #include "log.h"
 #include <stdlib.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 
 /* TRUE means that DMA-accessible buffers are placed in a non-cached RAM
    area and that no cache management is required.*/
@@ -190,10 +194,6 @@ inline static void mtr_commutation_set_state(uint8_t state) {
 }
 
 void mtr_commutation_transit_to_state(void) {
-  uint32_t end_cycles = DWT->CYCCNT;
-  uint32_t duration_cycles = end_cycles - last_isr_cycles;
-  last_isr_cycles = end_cycles;
-  debug_isr_duration_cycles = duration_cycles;
   switch(mtr_commutation_state) {
     case 0b100:
       mtr_commutation_set_state(0b110);
@@ -317,7 +317,7 @@ void mtr_control_stop(void) {
 #define MTR_ADC_NUM_CHANNELS 4
 #define MTR_ADC_BUF_DEPTH 1
 
-#define MTR_ADC_BACKEMF_THRESHOLD 0.3f
+#define MTR_ADC_BACKEMF_THRESHOLD 0.5f
 #define MTR_ADC_BACKEMF_PHASE_A 0
 #define MTR_ADC_BACKEMF_PHASE_B 1
 #define MTR_ADC_BACKEMF_PHASE_C 2
@@ -327,6 +327,31 @@ static adcsample_t mtr_voltage_adc_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DE
 
 float mtr_voltage_adc_get_voltage(uint8_t channel) {
   return (mtr_voltage_adc_samples[channel] / 4095.0f) * 3.3f;
+}
+
+// EMA filtered ADC samples
+static float mtr_voltage_adc_filtered[MTR_ADC_NUM_CHANNELS] = {0};
+// Alpha for EMA filter, can be set at runtime
+static float ema_alpha = 0.611f; // Default for 600Hz cutoff at 4kHz sample rate
+
+// Function to get filtered ADC value (in volts)
+float mtr_voltage_adc_get_filtered(uint8_t channel) {
+  if (channel >= MTR_ADC_NUM_CHANNELS) {
+    return 0.0f;
+  }
+  return mtr_voltage_adc_filtered[channel];
+}
+
+/**
+ * @brief Calculate EMA alpha for a given cutoff frequency and sample rate
+ * @param cutoff_freq Cutoff frequency in Hz
+ * @param sample_rate Sample rate in Hz
+ * @return Alpha value for EMA filter
+ *
+ * Usage: float alpha = calculate_ema_alpha(600.0f, 4000.0f);
+ */
+static float calculate_ema_alpha(float cutoff_freq, float sample_rate) {
+    return 1.0f - expf(-2.0f * (float)M_PI * cutoff_freq / sample_rate);
 }
 
 void mtr_voltage_adc_init(void) {
@@ -361,18 +386,27 @@ uint16_t mtr_backemf_voltage_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DEPTH];
 void mtr_commutation_adc_backemf_cb(ADCDriver *adcp) {
   (void)adcp;
 #ifndef JACK_DEBUG
+  for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
+    mtr_backemf_voltage_samples[i] = mtr_voltage_adc_samples[i];
+    // Update EMA filtered value
+    float new_sample = (mtr_voltage_adc_samples[i] / 4095.0f) * 3.3f;
+    mtr_voltage_adc_filtered[i] = ema_alpha * new_sample + (1.0f - ema_alpha) * mtr_voltage_adc_filtered[i];
+  }
+
   if(!mtr_commutation_is_vaild_state(mtr_commutation_state)) {
     return;
   }
-  for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
-    mtr_backemf_voltage_samples[i] = mtr_voltage_adc_samples[i];
-  }
+
+  uint32_t end_cycles = DWT->CYCCNT;
+  uint32_t duration_cycles = end_cycles - last_isr_cycles;
+  last_isr_cycles = end_cycles;
+  debug_isr_duration_cycles = duration_cycles;
 
   if(mtr_control_state == MTR_CONTROL_STATE_BACK_EMF_COMMUTATION) {
     uint8_t backemf_phase = mtr_backemf_phase_lookup[mtr_commutation_state];
     if(backemf_phase != 0xFF) {
-      float backemf_voltage = mtr_voltage_adc_get_voltage(backemf_phase);
-      float vpdd_voltage = mtr_voltage_adc_get_voltage(MTR_ADC_BACKEMF_VPDD);
+      float backemf_voltage = mtr_voltage_adc_get_filtered(backemf_phase);
+      float vpdd_voltage = mtr_voltage_adc_get_filtered(MTR_ADC_BACKEMF_VPDD);
       if(backemf_voltage >= vpdd_voltage * MTR_ADC_BACKEMF_THRESHOLD) {
         mtr_commutation_transit_to_state();
       }
@@ -480,6 +514,7 @@ void cmd_mtr_debug(BaseSequentialStream *chp, int argc, char *argv[]) {
   chprintf(chp, "Control state: %d\r\n", mtr_control_state);
   for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
     chprintf(chp, "ADC%d: %.1fv\r\n", i, (mtr_backemf_voltage_samples[i] / 4095.0f) * 3.3f);
+    chprintf(chp, "ADC%d filtered: %.1fv\r\n", i, mtr_voltage_adc_get_filtered(i));
   }
   chprintf(chp, "Commutation state: %d\r\n", mtr_commutation_state);
 }
@@ -609,6 +644,10 @@ int main(void) {
 
   mtr_voltage_adc_init();
 
+  // Set EMA filter alpha for desired cutoff frequency and sample rate
+  // Example: 600 Hz cutoff, 4000 Hz sample rate
+  ema_alpha = calculate_ema_alpha(600.0f, 4000.0f);
+
    /*
    * Activates the ADC driver
    */
@@ -622,7 +661,7 @@ int main(void) {
   /*
    * Start the GPT timer in continuous mode
    */
-  gptStartContinuous(&GPTD3, 2500); // update frequency = 1M / 2500 = 400Hz
+  gptStartContinuous(&GPTD3, 250); // update frequency = 1M / 250 = 4000Hz
 
   /*
    * Creates the blinker thread.
