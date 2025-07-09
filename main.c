@@ -79,7 +79,7 @@ static GPTConfig gpt3_config = {
 
 static PWMConfig mtr_pwm_config = {
   42000000, // 42MHz
-  420, // 50KHz
+  420, // 100KHz
   NULL,
   {
     {PWM_OUTPUT_ACTIVE_HIGH, NULL},
@@ -469,7 +469,7 @@ void cmd_mtr_run(BaseSequentialStream *chp, int argc, char *argv[]) {
     mtr_duty = atoi(argv[0]) * 100;
     LOG("mtr_duty: %d\r\n", mtr_duty);
     if(mtr_duty != 0) {
-      mtr_control_start(mtr_duty, 5000);
+      mtr_control_start(mtr_duty, 300);
     }
     else {
       mtr_control_stop();
