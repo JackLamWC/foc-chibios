@@ -99,12 +99,12 @@
 /*
  * ADC driver system settings.
  */
-#define STM32_ADC_ADCPRE                    ADC_CCR_ADCPRE_DIV4
+#define STM32_ADC_ADCPRE                    ADC_CCR_ADCPRE_DIV8
 #define STM32_ADC_USE_ADC1                  TRUE
 #define STM32_ADC_ADC1_DMA_STREAM           STM32_DMA_STREAM_ID(2, 4)
 #define STM32_ADC_ADC1_DMA_PRIORITY         2
-#define STM32_ADC_IRQ_PRIORITY              6
-#define STM32_ADC_ADC1_DMA_IRQ_PRIORITY     6
+#define STM32_ADC_IRQ_PRIORITY              3
+#define STM32_ADC_ADC1_DMA_IRQ_PRIORITY     3
 
 /*
  * GPT driver system settings.
@@ -116,7 +116,7 @@
 #define STM32_GPT_USE_TIM5                  FALSE
 #define STM32_GPT_USE_TIM9                  FALSE
 #define STM32_GPT_USE_TIM10                 FALSE
-#define STM32_GPT_USE_TIM11                 FALSE
+#define STM32_GPT_USE_TIM11                 TRUE
 
 /*
  * I2C driver system settings.

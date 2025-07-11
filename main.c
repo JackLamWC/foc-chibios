@@ -36,16 +36,25 @@
 #define LINE_DRV_M_OC               PAL_LINE(GPIOC, GPIOC_PIN12)
 #define LINE_DRV_OC_ADJ             PAL_LINE(GPIOD, GPIOD_PIN2)
 #define LINE_DRV_M_PWM              PAL_LINE(GPIOC, GPIOD_PIN9)
+#define LINE_DRV_DEBUG              PAL_LINE(GPIOC, GPIOC_PIN6)
 
 /*===========================================================================*/
 /* GPT related.                                                              */
 /*===========================================================================*/
 static uint32_t last_isr_cycles = 0;
 static uint32_t debug_isr_duration_cycles = 0;
+static uint32_t end_cycles = 0;
 
 
 static GPTConfig gpt3_config = {
-  .frequency = 1000000, // 1MHz
+  .frequency = 2000000, // 1MHz
+  .callback = NULL,
+  .cr2 = TIM_CR2_MMS_1,
+  .dier = 0,
+};
+
+static GPTConfig gpt11_mtr_velocity_config = {
+  .frequency = 5000000, // 1MHz
   .callback = NULL,
   .cr2 = TIM_CR2_MMS_1,
   .dier = 0,
@@ -79,12 +88,12 @@ static GPTConfig gpt3_config = {
 
 static PWMConfig mtr_pwm_config = {
   42000000, // 42MHz
-  420, // 100KHz
+  105, // 50KHz
   NULL,
   {
-    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
-    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
-    {PWM_OUTPUT_ACTIVE_HIGH, NULL},
+    {PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH, NULL},
+    {PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH, NULL},
+    {PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH, NULL},
     {PWM_OUTPUT_DISABLED, NULL}
   },
   0,
@@ -157,7 +166,6 @@ static mtr_commutation_phase mtr_commutation_phase_table[8][3] = {
   {MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING, MTR_COMMUTATION_PASHE_FLOATING}, // 111 - invalid state
 };
 
-
 static uint8_t last_state = 0;
 inline static void mtr_commutation_set_state(uint8_t state) {
   mtr_commutation_state = state;
@@ -167,56 +175,77 @@ inline static void mtr_commutation_set_state(uint8_t state) {
   last_state = state;
     
   uint16_t phases_duty[MTR_PWM_CHANNELS] = {0, 0, 0};
-  pwmStop(&PWMD1);
   for(int i = 0; i < MTR_PWM_CHANNELS; i++) {
     switch(mtr_commutation_phase_table[state][i]) {
       case MTR_COMMUTATION_PASHE_IN: {
         phases_duty[i] = 5000 + mtr_duty / 2;
-        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH;
+        // mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH;
         break;
       }
       case MTR_COMMUTATION_PASHE_OUT: {
-        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_LOW | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_LOW;
-        phases_duty[i] = 10000 - (5000 - mtr_duty / 2);
+        // mtr_pwm_config.channels[i].mode = PWM_OUTPUT_ACTIVE_HIGH | PWM_COMPLEMENTARY_OUTPUT_ACTIVE_HIGH;
+        phases_duty[i] = 5000 - mtr_duty / 2;
         break;
       }
       case MTR_COMMUTATION_PASHE_FLOATING: {
         phases_duty[i] = 0;
-        mtr_pwm_config.channels[i].mode = PWM_OUTPUT_DISABLED;
+        // mtr_pwm_config.channels[i].mode = PWM_OUTPUT_DISABLED;
         break;
       }
     }
   }
-  pwmStart(&PWMD1, &mtr_pwm_config);
+  // pwmStart(&PWMD1, &mtr_pwm_config);
   for(int i = 0; i < MTR_PWM_CHANNELS; i++) {
-    mtr_pwm_write_duty(i, phases_duty[i]);
+    if(phases_duty[i] != 0) {
+      if(i == 0) {
+        TIM1->CCER |= TIM_CCER_CC1NE;
+        TIM1->CCER |= TIM_CCER_CC1E;
+      }
+      else if(i == 1) {
+        TIM1->CCER |= TIM_CCER_CC2NE;
+        TIM1->CCER |= TIM_CCER_CC2E;
+      }
+      else if(i == 2) {
+        TIM1->CCER |= TIM_CCER_CC3NE;
+        TIM1->CCER |= TIM_CCER_CC3E;
+      }
+      pwmEnableChannel(&PWMD1, i, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, phases_duty[i]));
+    }
+    else {
+      if(i == 0) {
+        TIM1->CCER &= ~TIM_CCER_CC1NE;
+        TIM1->CCER &= ~TIM_CCER_CC1E;
+      }
+      else if(i == 1) {
+        TIM1->CCER &= ~TIM_CCER_CC2NE;
+        TIM1->CCER &= ~TIM_CCER_CC2E;
+      }
+      else if(i == 2) {
+        TIM1->CCER &= ~TIM_CCER_CC3NE;
+        TIM1->CCER &= ~TIM_CCER_CC3E;
+      }
+    }
   }
 }
 
+// Add this lookup table before the mtr_commutation_transit_to_state function
+static const uint8_t mtr_commutation_next_state[8] = {
+  0b000, // 0b000 - invalid state -> invalid state
+  0b101, // 0b001 -> 0b101
+  0b011, // 0b010 -> 0b011
+  0b001, // 0b011 -> 0b001
+  0b110, // 0b100 -> 0b110
+  0b100, // 0b101 -> 0b100
+  0b010, // 0b110 -> 0b010
+  0b000  // 0b111 - invalid state -> invalid state
+};
+
+static uint16_t mtr_velocity = 0;
 void mtr_commutation_transit_to_state(void) {
-  switch(mtr_commutation_state) {
-    case 0b100:
-      mtr_commutation_set_state(0b110);
-      break;
-    case 0b110:
-      mtr_commutation_set_state(0b010);
-      break;
-    case 0b010:
-      mtr_commutation_set_state(0b011);
-      break;
-    case 0b011:
-      mtr_commutation_set_state(0b001);
-      break;
-    case 0b001:
-      mtr_commutation_set_state(0b101);
-      break;
-    case 0b101:
-      mtr_commutation_set_state(0b100);
-      break;
-    default:
-      mtr_commutation_set_state(0b000);
-      break;
-  }
+  mtr_velocity = gptGetCounterX(&GPTD11);
+  gptStopTimer(&GPTD11);
+  gptStartOneShot(&GPTD11, 65535);
+  mtr_commutation_set_state(mtr_commutation_next_state[mtr_commutation_state & 0x07]);
 }
 
 /*
@@ -317,7 +346,7 @@ void mtr_control_stop(void) {
 #define MTR_ADC_NUM_CHANNELS 4
 #define MTR_ADC_BUF_DEPTH 1
 
-#define MTR_ADC_BACKEMF_THRESHOLD 0.5f
+#define MTR_ADC_BACKEMF_THRESHOLD 0.8f
 #define MTR_ADC_BACKEMF_PHASE_A 0
 #define MTR_ADC_BACKEMF_PHASE_B 1
 #define MTR_ADC_BACKEMF_PHASE_C 2
@@ -383,31 +412,31 @@ static void mtr_backemf_init(void) {
 }
 
 uint16_t mtr_backemf_voltage_samples[MTR_ADC_NUM_CHANNELS * MTR_ADC_BUF_DEPTH];
+uint16_t mtr_backemf_mask_cnt = 0;
 void mtr_commutation_adc_backemf_cb(ADCDriver *adcp) {
   (void)adcp;
+  uint32_t duration_cycles = DWT->CYCCNT - end_cycles;
+  end_cycles = DWT->CYCCNT;
+  debug_isr_duration_cycles = duration_cycles;
 #ifndef JACK_DEBUG
-  for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
-    mtr_backemf_voltage_samples[i] = mtr_voltage_adc_samples[i];
-    // Update EMA filtered value
-    float new_sample = (mtr_voltage_adc_samples[i] / 4095.0f) * 3.3f;
-    mtr_voltage_adc_filtered[i] = ema_alpha * new_sample + (1.0f - ema_alpha) * mtr_voltage_adc_filtered[i];
-  }
-
   if(!mtr_commutation_is_vaild_state(mtr_commutation_state)) {
     return;
   }
 
-  uint32_t end_cycles = DWT->CYCCNT;
-  uint32_t duration_cycles = end_cycles - last_isr_cycles;
-  last_isr_cycles = end_cycles;
-  debug_isr_duration_cycles = duration_cycles;
-
   if(mtr_control_state == MTR_CONTROL_STATE_BACK_EMF_COMMUTATION) {
     uint8_t backemf_phase = mtr_backemf_phase_lookup[mtr_commutation_state];
     if(backemf_phase != 0xFF) {
-      float backemf_voltage = mtr_voltage_adc_get_filtered(backemf_phase);
-      float vpdd_voltage = mtr_voltage_adc_get_filtered(MTR_ADC_BACKEMF_VPDD);
-      if(backemf_voltage >= vpdd_voltage * MTR_ADC_BACKEMF_THRESHOLD) {
+      float backemf_voltage = mtr_voltage_adc_get_voltage(backemf_phase);
+      float vpdd_voltage = mtr_voltage_adc_get_voltage(MTR_ADC_BACKEMF_VPDD);
+      float threshold_interval = vpdd_voltage * 0.20f; // 20% of VPDD voltage
+      if(backemf_voltage >= (vpdd_voltage * MTR_ADC_BACKEMF_THRESHOLD - threshold_interval) && backemf_voltage <= (vpdd_voltage * MTR_ADC_BACKEMF_THRESHOLD + threshold_interval)) {
+        mtr_backemf_mask_cnt++;
+        if(palReadLine(LINE_DRV_DEBUG)) {
+          palClearLine(LINE_DRV_DEBUG);
+        }
+        else {
+          palSetLine(LINE_DRV_DEBUG);
+        }
         mtr_commutation_transit_to_state();
       }
     }
@@ -430,8 +459,8 @@ static ADCConversionGroup mtr_voltage_adc_groupConfig = {
   NULL,
   0,
   ADC_CR2_EXTEN_RISING | ADC_CR2_EXTSEL_SRC(8),
-  ADC_SMPR1_SMP_AN11(ADC_SAMPLE_3),
-  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_3) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_3),
+  ADC_SMPR1_SMP_AN11(ADC_SAMPLE_84),
+  ADC_SMPR2_SMP_AN0(ADC_SAMPLE_84) | ADC_SMPR2_SMP_AN1(ADC_SAMPLE_84) | ADC_SMPR2_SMP_AN4(ADC_SAMPLE_84),
   0,
   0,
   0,
@@ -456,7 +485,7 @@ void cmd_adc(BaseSequentialStream *chp, int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
-    chprintf(chp, "ADC%d: %.1fv\r\n", i, (mtr_voltage_adc_samples[i] / 4095.0f) * 3.3f);
+    chprintf(chp, "ADC%d: %.3fv\r\n", i, (mtr_voltage_adc_samples[i] / 4095.0f) * 3.3f);
   }
 }
 
@@ -513,10 +542,11 @@ void cmd_mtr_debug(BaseSequentialStream *chp, int argc, char *argv[]) {
   chprintf(chp, "ISR duration: %d\r\n", debug_isr_duration_cycles);
   chprintf(chp, "Control state: %d\r\n", mtr_control_state);
   for(int i = 0; i < MTR_ADC_NUM_CHANNELS; i++) {
-    chprintf(chp, "ADC%d: %.1fv\r\n", i, (mtr_backemf_voltage_samples[i] / 4095.0f) * 3.3f);
-    chprintf(chp, "ADC%d filtered: %.1fv\r\n", i, mtr_voltage_adc_get_filtered(i));
+    chprintf(chp, "ADC%d: %.3fv\r\n", i, (mtr_backemf_voltage_samples[i] / 4095.0f) * 3.3f);
+    chprintf(chp, "ADC%d filtered: %.3fv\r\n", i, mtr_voltage_adc_get_filtered(i));
   }
   chprintf(chp, "Commutation state: %d\r\n", mtr_commutation_state);
+  chprintf(chp, "Mtr velocity: %.2f\r\n", (1 / 5000000.0f * mtr_velocity) * 1000000.0f );
 }
 
 void cmd_mtr_set_state(BaseSequentialStream *chp, int argc, char *argv[]) {
@@ -632,6 +662,8 @@ int main(void) {
    */
   gptStart(&GPTD3, &gpt3_config);
 
+  gptStart(&GPTD11, &gpt11_mtr_velocity_config);
+
   /*
    * Initialize the PWM driver
    */
@@ -661,7 +693,7 @@ int main(void) {
   /*
    * Start the GPT timer in continuous mode
    */
-  gptStartContinuous(&GPTD3, 250); // update frequency = 1M / 250 = 4000Hz
+  gptStartContinuous(&GPTD3, 125); // update frequency = 2M / 125 = 8000Hz
 
   /*
    * Creates the blinker thread.
@@ -684,6 +716,7 @@ int main(void) {
   palSetLineMode(LINE_DRV_M_OC, PAL_MODE_OUTPUT_PUSHPULL);
   palSetLineMode(LINE_DRV_OC_ADJ, PAL_MODE_OUTPUT_PUSHPULL);
   palSetLineMode(LINE_DRV_M_PWM, PAL_MODE_OUTPUT_PUSHPULL);
+  palSetLineMode(LINE_DRV_DEBUG, PAL_MODE_OUTPUT_PUSHPULL);
 
   palClearLine(LINE_DRV_M_OC);
   palSetLine(LINE_DRV_OC_ADJ);

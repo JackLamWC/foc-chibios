@@ -1,6 +1,0 @@
-{
-    "files.associations": {
-        "chprintf.h": "c",
-        "shell.h": "c"
-    }
-}
